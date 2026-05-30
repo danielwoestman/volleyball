@@ -215,6 +215,11 @@ const BOSS_HTML = `<!doctype html>
     background: #11141c; color: #e8eaf0; border: 1px solid #1d2230;
     border-radius: 10px; padding: 10px 12px; font-size: 14px; font-weight: 600;
   }
+  .sent {
+    width: 100%; border-radius: 10px; border: 1px solid #1d2230;
+    background: #000; display: none; image-rendering: auto;
+  }
+  .sent.on { display: block; }
   .controls { display: flex; flex-direction: column; gap: 10px; }
   button {
     appearance: none; border: 0; border-radius: 12px; padding: 14px;
@@ -262,7 +267,17 @@ const BOSS_HTML = `<!doctype html>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
       </div>
       <div class="zoom">
-        <div class="row"><span class="k">Quality</span><span class="v" id="resInfo">—</span></div>
+        <div class="row"><span class="k">Resolution</span></div>
+        <select id="resSel">
+          <option value="480">480px</option>
+          <option value="720">720px</option>
+          <option value="960" selected>960px</option>
+          <option value="1280">1280px</option>
+          <option value="0">Full camera</option>
+        </select>
+      </div>
+      <div class="zoom">
+        <div class="row"><span class="k">Quality</span></div>
         <select id="qualSel">
           <option value="0.3">Low — smallest</option>
           <option value="0.5">Medium</option>
@@ -270,6 +285,10 @@ const BOSS_HTML = `<!doctype html>
           <option value="0.85">Very high</option>
           <option value="0.95">Max — largest</option>
         </select>
+      </div>
+      <div class="zoom">
+        <div class="row"><span class="k">Sent to viewers</span><span class="v" id="resInfo">—</span></div>
+        <img id="sent" class="sent" alt="Last sent frame" />
       </div>
       <div class="zoom">
         <div class="row"><span class="k">Photo every</span></div>
@@ -290,14 +309,17 @@ const BOSS_HTML = `<!doctype html>
     </div>
   </div>
   <div class="err" id="err"></div>
-  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. Photos are sent at full camera resolution — use Quality to trade sharpness against upload size. The screen is kept awake automatically while broadcasting.</div>
+  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. The “Sent to viewers” image shows exactly what is broadcast — adjust Resolution and Quality until it looks good enough. The screen is kept awake automatically while broadcasting.</div>
  </div>
 <script>
   const MAX_DIM = 4096;       // hard ceiling on the encoded frame's longest side
   let intervalMs = 5000;      // capture cadence; adjustable on the fly
-  let jpegQuality = 0.7;      // JPEG quality, the only lossy step; adjustable
+  let maxWidth = 960;         // single downsize target (px); 0 = full camera
+  let jpegQuality = 0.7;      // JPEG quality; adjustable
   const video = document.getElementById("preview");
   const camSel = document.getElementById("camSel");
+  const resSel = document.getElementById("resSel");
+  const sentImg = document.getElementById("sent");
   const qualSel = document.getElementById("qualSel");
   const resInfo = document.getElementById("resInfo");
   const intervalSel = document.getElementById("intervalSel");
@@ -438,9 +460,10 @@ const BOSS_HTML = `<!doctype html>
       // Digital zoom: crop the centre by the zoom factor, offset by the pan.
       const sw = vw / zoom, sh = vh / zoom;
       const sx = (vw - sw) / 2 + panX * vw, sy = (vh - sh) / 2 + panY * vh;
-      // Encode at the crop's native resolution — no pre-downscale — so JPEG is
-      // the only lossy step. A ceiling guards against absurd canvas sizes.
-      const fit = Math.min(1, MAX_DIM / Math.max(sw, sh));
+      // The single downsize happens here, on the phone: scale the crop to the
+      // chosen width (0 = full camera, capped by MAX_DIM), then JPEG-encode once.
+      const target = maxWidth || sw;
+      const fit = Math.min(1, target / sw, MAX_DIM / Math.max(sw, sh));
       canvas.width = Math.round(sw * fit);
       canvas.height = Math.round(sh * fit);
       const ctx = canvas.getContext("2d");
@@ -457,6 +480,12 @@ const BOSS_HTML = `<!doctype html>
       countEl.textContent = count;
       lastEl.textContent = new Date().toLocaleTimeString();
       resInfo.textContent = canvas.width + "×" + canvas.height + " · " + Math.round(blob.size / 1024) + " KB";
+      // Show exactly what viewers receive: the encoded JPEG itself, decoded back.
+      const url = URL.createObjectURL(blob);
+      const prev = sentImg.src;
+      sentImg.onload = () => { if (prev.startsWith("blob:")) URL.revokeObjectURL(prev); };
+      sentImg.src = url;
+      sentImg.classList.add("on");
       setErr("");
     } catch (e) {
       setErr("Upload problem: " + e.message + " (will retry on next frame)");
@@ -464,6 +493,9 @@ const BOSS_HTML = `<!doctype html>
       sending = false;
     }
   }
+
+  // Resolution (the single downsize target) — takes effect on the next frame.
+  resSel.addEventListener("change", () => { maxWidth = parseInt(resSel.value, 10) || 0; });
 
   // JPEG quality selection — takes effect on the next captured frame.
   qualSel.addEventListener("change", () => { jpegQuality = parseFloat(qualSel.value) || 0.7; });
