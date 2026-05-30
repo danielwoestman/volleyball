@@ -1,7 +1,7 @@
 // Scoreboard broadcast server — single file, zero dependencies.
 //
 //   GET  /            -> viewer page (shows the latest photo, polls every 2s)
-//   GET  /boss        -> capture page (camera, snaps + uploads every 5s)
+//   GET  /boss        -> capture page (camera, zoom, snaps + uploads every 5s)
 //   POST /upload      -> receives a JPEG body, keeps it as "the latest photo"
 //   GET  /latest.jpg  -> serves the latest photo bytes
 //   GET  /status      -> { hasImage, lastUpdate } for the viewer's polling
@@ -116,75 +116,122 @@ const BOSS_HTML = `<!doctype html>
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
     background: #0b0d12;
     color: #e8eaf0;
-    min-height: 100vh;
+    min-height: 100%;
+    padding: env(safe-area-inset-top) 12px env(safe-area-inset-bottom);
+    /* keep the page from rubber-banding so two-finger pinch zooms the camera */
+    overscroll-behavior: none;
+  }
+  .app {
+    max-width: 920px;
+    margin: 0 auto;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: env(safe-area-inset-top) 16px 24px;
   }
-  h1 { font-size: 18px; font-weight: 600; letter-spacing: .02em; margin: 16px 0 4px; }
-  .sub { color: #8b93a7; font-size: 13px; margin-bottom: 16px; text-align: center; }
+  header { text-align: center; }
+  h1 { font-size: 16px; font-weight: 600; letter-spacing: .02em; margin: 8px 0 2px; }
+  .sub { color: #8b93a7; font-size: 12px; margin: 0 0 10px; }
+  .layout {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
   .stage {
     position: relative;
     width: 100%;
-    max-width: 520px;
+    max-width: 340px;     /* smaller preview so the controls always fit */
     aspect-ratio: 4 / 3;
     background: #000;
     border-radius: 14px;
-    overflow: hidden;
+    overflow: hidden;     /* crops the CSS-zoomed (digital) preview */
     border: 1px solid #1d2230;
+    flex: none;
+    touch-action: none;   /* let us own pinch gestures on the preview */
   }
-  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; transform-origin: center center; }
   .badge {
     position: absolute; top: 10px; left: 10px;
     display: flex; align-items: center; gap: 6px;
     background: rgba(0,0,0,.55); padding: 5px 10px; border-radius: 999px;
     font-size: 12px; font-weight: 600;
   }
+  .zoomtag {
+    position: absolute; top: 10px; right: 10px;
+    background: rgba(0,0,0,.55); padding: 5px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums;
+  }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
   .dot.live { background: #ff3b30; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
-  .controls { width: 100%; max-width: 520px; margin-top: 18px; display: flex; flex-direction: column; gap: 12px; }
+  .panel { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 12px; }
+  .zoom { display: flex; flex-direction: column; gap: 6px; }
+  .zoom .row { display: flex; justify-content: space-between; align-items: baseline; }
+  .zoom .k { color: #8b93a7; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  .zoom .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: #2f7bff; height: 28px; }
+  .controls { display: flex; flex-direction: column; gap: 10px; }
   button {
-    appearance: none; border: 0; border-radius: 12px; padding: 16px;
-    font-size: 17px; font-weight: 600; cursor: pointer; width: 100%;
+    appearance: none; border: 0; border-radius: 12px; padding: 14px;
+    font-size: 16px; font-weight: 600; cursor: pointer; width: 100%;
   }
   .start { background: #2f7bff; color: #fff; }
   .stop { background: #2a2f3d; color: #e8eaf0; }
   button:disabled { opacity: .4; cursor: default; }
-  .stats {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
-    width: 100%; max-width: 520px; margin-top: 14px;
-  }
-  .stat { background: #11141c; border: 1px solid #1d2230; border-radius: 12px; padding: 12px 14px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat { background: #11141c; border: 1px solid #1d2230; border-radius: 12px; padding: 10px 12px; }
   .stat .k { color: #8b93a7; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-  .stat .v { font-size: 20px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
-  .err { color: #ff6b60; font-size: 14px; margin-top: 12px; text-align: center; max-width: 520px; }
-  .hint { color: #5d6477; font-size: 12px; margin-top: 16px; text-align: center; max-width: 520px; line-height: 1.5; }
+  .stat .v { font-size: 18px; font-weight: 700; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .err { color: #ff6b60; font-size: 13px; margin-top: 10px; text-align: center; max-width: 340px; }
+  .hint { color: #5d6477; font-size: 12px; margin-top: 12px; text-align: center; max-width: 340px; line-height: 1.5; }
+
+  /* Landscape: put the preview and controls side by side and drive the preview
+     off the viewport height so everything is visible without scrolling. */
+  @media (orientation: landscape) {
+    .layout { flex-direction: row; align-items: flex-start; justify-content: center; }
+    .stage { width: auto; height: min(64vh, 300px); aspect-ratio: 4 / 3; max-width: none; }
+    .panel { max-width: 320px; }
+    .err, .hint { max-width: 660px; }
+  }
 </style>
 </head>
 <body>
-  <h1>Scoreboard Capture</h1>
-  <div class="sub">Point the camera at the scoreboard. A photo is sent every 5&nbsp;seconds.</div>
-  <div class="stage">
-    <video id="preview" playsinline muted autoplay></video>
-    <div class="badge"><span class="dot" id="dot"></span><span id="badgeText">Idle</span></div>
-  </div>
-  <div class="controls">
-    <button class="start" id="startBtn">Start broadcasting</button>
-    <button class="stop" id="stopBtn" disabled>Stop</button>
-  </div>
-  <div class="stats">
-    <div class="stat"><div class="k">Photos sent</div><div class="v" id="count">0</div></div>
-    <div class="stat"><div class="k">Last sent</div><div class="v" id="last">—</div></div>
+ <div class="app">
+  <header>
+    <h1>Scoreboard Capture</h1>
+    <div class="sub">Point the camera at the scoreboard. A photo is sent every 5&nbsp;seconds.</div>
+  </header>
+  <div class="layout">
+    <div class="stage" id="stage">
+      <video id="preview" playsinline muted autoplay></video>
+      <div class="badge"><span class="dot" id="dot"></span><span id="badgeText">Idle</span></div>
+      <div class="zoomtag" id="zoomTag">1.0×</div>
+    </div>
+    <div class="panel">
+      <div class="zoom">
+        <div class="row"><span class="k">Zoom</span><span class="v" id="zoomVal">1.0×</span></div>
+        <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
+      </div>
+      <div class="controls">
+        <button class="start" id="startBtn">Start broadcasting</button>
+        <button class="stop" id="stopBtn" disabled>Stop</button>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="k">Photos sent</div><div class="v" id="count">0</div></div>
+        <div class="stat"><div class="k">Last sent</div><div class="v" id="last">—</div></div>
+      </div>
+    </div>
   </div>
   <div class="err" id="err"></div>
-  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. The screen is kept awake automatically while broadcasting.</div>
+  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch the preview or drag the slider to zoom. The screen is kept awake automatically while broadcasting.</div>
+ </div>
 <script>
   const INTERVAL_MS = 5000;
   const MAX_WIDTH = 1280;     // downscale wide frames to keep uploads small
@@ -197,9 +244,59 @@ const BOSS_HTML = `<!doctype html>
   const countEl = document.getElementById("count");
   const lastEl = document.getElementById("last");
   const errEl = document.getElementById("err");
+  const stage = document.getElementById("stage");
+  const zoomSlider = document.getElementById("zoom");
+  const zoomVal = document.getElementById("zoomVal");
+  const zoomTag = document.getElementById("zoomTag");
   let stream = null, timer = null, count = 0, sending = false, wakeLock = null;
+  let track = null;            // active video track (for native zoom)
+  let nativeZoom = null;       // { min, max, step } when the camera supports it
+  let zoom = 1;                // current zoom factor (native units or digital ×)
   const canvas = document.createElement("canvas");
   function setErr(msg) { errEl.textContent = msg || ""; }
+
+  function fmtZoom(z) { return z.toFixed(1) + "×"; }
+  function showZoom() {
+    zoomVal.textContent = fmtZoom(zoom);
+    zoomTag.textContent = fmtZoom(zoom);
+  }
+  // Apply the current zoom. Prefer the camera's real zoom; otherwise fall back
+  // to digital zoom — scale the preview with CSS (the stage clips it) and crop
+  // the captured frame so the upload is actually zoomed in, not just the view.
+  function applyZoom() {
+    if (nativeZoom && track) {
+      track.applyConstraints({ advanced: [{ zoom }] }).catch(() => {});
+      video.style.transform = "";
+    } else {
+      video.style.transform = "scale(" + zoom + ")";
+    }
+    showZoom();
+  }
+  function setupZoomRange() {
+    // Reset to digital defaults, then widen if the camera exposes real zoom.
+    nativeZoom = null;
+    zoomSlider.min = "1"; zoomSlider.max = "5"; zoomSlider.step = "0.1";
+    try {
+      const caps = track && track.getCapabilities ? track.getCapabilities() : null;
+      if (caps && "zoom" in caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
+        nativeZoom = { min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 };
+        zoomSlider.min = String(nativeZoom.min);
+        zoomSlider.max = String(nativeZoom.max);
+        zoomSlider.step = String(nativeZoom.step);
+        const settings = track.getSettings ? track.getSettings() : {};
+        zoom = settings.zoom || nativeZoom.min || 1;
+      }
+    } catch {}
+    zoomSlider.value = String(zoom);
+    applyZoom();
+  }
+  function setZoom(z) {
+    const lo = parseFloat(zoomSlider.min), hi = parseFloat(zoomSlider.max);
+    zoom = Math.min(hi, Math.max(lo, z));
+    zoomSlider.value = String(zoom);
+    applyZoom();
+  }
+
   async function start() {
     setErr("");
     try {
@@ -212,7 +309,9 @@ const BOSS_HTML = `<!doctype html>
       return;
     }
     video.srcObject = stream;
+    track = stream.getVideoTracks()[0] || null;
     await video.play().catch(() => {});
+    setupZoomRange();
     startBtn.disabled = true;
     stopBtn.disabled = false;
     dot.classList.add("live");
@@ -224,6 +323,7 @@ const BOSS_HTML = `<!doctype html>
   function stop() {
     if (timer) clearInterval(timer), (timer = null);
     if (stream) stream.getTracks().forEach((t) => t.stop()), (stream = null);
+    track = null;
     video.srcObject = null;
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -235,11 +335,17 @@ const BOSS_HTML = `<!doctype html>
     if (sending || !video.videoWidth) return;
     sending = true;
     try {
-      const scale = Math.min(1, MAX_WIDTH / video.videoWidth);
-      canvas.width = Math.round(video.videoWidth * scale);
-      canvas.height = Math.round(video.videoHeight * scale);
+      const vw = video.videoWidth, vh = video.videoHeight;
+      // With digital zoom the camera frame isn't zoomed, so crop the centre by
+      // the zoom factor. With native zoom the frame is already zoomed: crop 1:1.
+      const crop = nativeZoom ? 1 : zoom;
+      const sw = vw / crop, sh = vh / crop;
+      const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+      const scale = Math.min(1, MAX_WIDTH / sw);
+      canvas.width = Math.round(sw * scale);
+      canvas.height = Math.round(sh * scale);
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
       const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", JPEG_QUALITY));
       if (!blob) throw new Error("encode failed");
       const res = await fetch("/upload", {
@@ -258,6 +364,38 @@ const BOSS_HTML = `<!doctype html>
       sending = false;
     }
   }
+
+  // Slider zoom.
+  zoomSlider.addEventListener("input", () => setZoom(parseFloat(zoomSlider.value)));
+
+  // Pinch-to-zoom on the preview.
+  const pointers = new Map();
+  let pinchStartDist = 0, pinchStartZoom = 1;
+  stage.addEventListener("pointerdown", (e) => {
+    pointers.set(e.pointerId, e);
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStartDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      pinchStartZoom = zoom;
+    }
+  });
+  stage.addEventListener("pointermove", (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, e);
+    if (pointers.size === 2 && pinchStartDist > 0) {
+      const [a, b] = [...pointers.values()];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      setZoom(pinchStartZoom * (dist / pinchStartDist));
+      e.preventDefault();
+    }
+  }, { passive: false });
+  function dropPointer(e) {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinchStartDist = 0;
+  }
+  stage.addEventListener("pointerup", dropPointer);
+  stage.addEventListener("pointercancel", dropPointer);
+  stage.addEventListener("pointerleave", dropPointer);
   async function requestWakeLock() {
     try {
       if ("wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
