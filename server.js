@@ -313,9 +313,9 @@ const BOSS_HTML = `<!doctype html>
   const zoomVal = document.getElementById("zoomVal");
   const zoomTag = document.getElementById("zoomTag");
   let stream = null, timer = null, count = 0, sending = false, wakeLock = null;
-  let track = null;            // active video track (for native zoom)
-  let nativeZoom = null;       // { min, max, step } when the camera supports it
-  let zoom = 1;                // current zoom factor (native units or digital ×)
+  let track = null;            // active video track
+  let nativeZoom = null;       // kept null: zoom is always digital so pan works
+  let zoom = 1;                // current digital zoom factor (×)
   let panX = 0, panY = 0;      // digital-zoom pan, normalized -1..1 (0 = centre)
   let deviceId = "";           // chosen camera; "" = let the browser pick rear
   const canvas = document.createElement("canvas");
@@ -366,32 +366,18 @@ const BOSS_HTML = `<!doctype html>
   // it) and crop the captured frame so the upload matches what's shown.
   function applyZoom() {
     clampPan();
-    if (nativeZoom && track) {
-      track.applyConstraints({ advanced: [{ zoom }] }).catch(() => {});
-      video.style.transform = "";
-    } else {
-      // Translate by the pan offset (in % of the element), then scale. Negative
-      // because moving the view right means shifting the image left.
-      const tx = -panX * 100, ty = -panY * 100;
-      video.style.transform = "scale(" + zoom + ") translate(" + tx + "%, " + ty + "%)";
-    }
+    // Always digital zoom: scale + translate the preview, and crop the captured
+    // frame to match. This keeps panning available on every device (optical zoom
+    // crops on the sensor centre, where there's nothing to pan to). Quality is
+    // unaffected here since we downscale to maxWidth anyway.
+    const tx = -panX * 100, ty = -panY * 100;
+    video.style.transform = "scale(" + zoom + ") translate(" + tx + "%, " + ty + "%)";
     showZoom();
   }
   function setupZoomRange() {
-    // Reset to digital defaults, then widen if the camera exposes real zoom.
+    // Digital zoom range, the same on every device.
     nativeZoom = null;
     zoomSlider.min = "1"; zoomSlider.max = "5"; zoomSlider.step = "0.1";
-    try {
-      const caps = track && track.getCapabilities ? track.getCapabilities() : null;
-      if (caps && "zoom" in caps && caps.zoom && caps.zoom.max > caps.zoom.min) {
-        nativeZoom = { min: caps.zoom.min, max: caps.zoom.max, step: caps.zoom.step || 0.1 };
-        zoomSlider.min = String(nativeZoom.min);
-        zoomSlider.max = String(nativeZoom.max);
-        zoomSlider.step = String(nativeZoom.step);
-        const settings = track.getSettings ? track.getSettings() : {};
-        zoom = settings.zoom || nativeZoom.min || 1;
-      }
-    } catch {}
     zoomSlider.value = String(zoom);
     applyZoom();
   }
