@@ -257,6 +257,16 @@ const BOSS_HTML = `<!doctype html>
         <div class="row"><span class="k">Zoom</span><span class="v" id="zoomVal">1.0×</span></div>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
       </div>
+      <div class="zoom">
+        <div class="row"><span class="k">Resolution</span><span class="v" id="resInfo">—</span></div>
+        <select id="resSel">
+          <option value="320">Tiny — 320px</option>
+          <option value="480" selected>Low — 480px</option>
+          <option value="640">Medium — 640px</option>
+          <option value="960">High — 960px</option>
+          <option value="1280">Max — 1280px</option>
+        </select>
+      </div>
       <div class="controls">
         <button class="start" id="startBtn">Start broadcasting</button>
         <button class="stop" id="stopBtn" disabled>Stop</button>
@@ -272,10 +282,12 @@ const BOSS_HTML = `<!doctype html>
  </div>
 <script>
   const INTERVAL_MS = 5000;
-  const MAX_WIDTH = 480;      // viewed only on phones, so keep frames small
+  let maxWidth = 480;         // capture width in px; adjustable on the fly
   const JPEG_QUALITY = 0.5;
   const video = document.getElementById("preview");
   const camSel = document.getElementById("camSel");
+  const resSel = document.getElementById("resSel");
+  const resInfo = document.getElementById("resInfo");
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const dot = document.getElementById("dot");
@@ -411,7 +423,7 @@ const BOSS_HTML = `<!doctype html>
       const crop = nativeZoom ? 1 : zoom;
       const sw = vw / crop, sh = vh / crop;
       const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
-      const scale = Math.min(1, MAX_WIDTH / sw);
+      const scale = Math.min(1, maxWidth / sw);
       canvas.width = Math.round(sw * scale);
       canvas.height = Math.round(sh * scale);
       const ctx = canvas.getContext("2d");
@@ -427,6 +439,7 @@ const BOSS_HTML = `<!doctype html>
       count++;
       countEl.textContent = count;
       lastEl.textContent = new Date().toLocaleTimeString();
+      resInfo.textContent = canvas.width + "×" + canvas.height + " · " + Math.round(blob.size / 1024) + " KB";
       setErr("");
     } catch (e) {
       setErr("Upload problem: " + e.message + " (will retry on next frame)");
@@ -434,6 +447,9 @@ const BOSS_HTML = `<!doctype html>
       sending = false;
     }
   }
+
+  // Resolution selection — takes effect on the next captured frame.
+  resSel.addEventListener("change", () => { maxWidth = parseInt(resSel.value, 10) || 480; });
 
   // Camera selection. Re-open the stream live if we're already broadcasting.
   camSel.addEventListener("change", async () => {
