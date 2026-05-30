@@ -267,6 +267,14 @@ const BOSS_HTML = `<!doctype html>
           <option value="1280">Max — 1280px</option>
         </select>
       </div>
+      <div class="zoom">
+        <div class="row"><span class="k">Photo every</span></div>
+        <select id="intervalSel">
+          <option value="5" selected>5 seconds</option>
+          <option value="10">10 seconds</option>
+          <option value="15">15 seconds</option>
+        </select>
+      </div>
       <div class="controls">
         <button class="start" id="startBtn">Start broadcasting</button>
         <button class="stop" id="stopBtn" disabled>Stop</button>
@@ -278,16 +286,17 @@ const BOSS_HTML = `<!doctype html>
     </div>
   </div>
   <div class="err" id="err"></div>
-  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch the preview or drag the slider to zoom. The screen is kept awake automatically while broadcasting.</div>
+  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. The screen is kept awake automatically while broadcasting.</div>
  </div>
 <script>
-  const INTERVAL_MS = 5000;
+  let intervalMs = 5000;      // capture cadence; adjustable on the fly
   let maxWidth = 480;         // capture width in px; adjustable on the fly
   const JPEG_QUALITY = 0.5;
   const video = document.getElementById("preview");
   const camSel = document.getElementById("camSel");
   const resSel = document.getElementById("resSel");
   const resInfo = document.getElementById("resInfo");
+  const intervalSel = document.getElementById("intervalSel");
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const dot = document.getElementById("dot");
@@ -303,6 +312,7 @@ const BOSS_HTML = `<!doctype html>
   let track = null;            // active video track (for native zoom)
   let nativeZoom = null;       // { min, max, step } when the camera supports it
   let zoom = 1;                // current zoom factor (native units or digital ×)
+  let panX = 0, panY = 0;      // digital-zoom pan, normalized -1..1 (0 = centre)
   let deviceId = "";           // chosen camera; "" = let the browser pick rear
   const canvas = document.createElement("canvas");
   function setErr(msg) { errEl.textContent = msg || ""; }
@@ -334,15 +344,32 @@ const BOSS_HTML = `<!doctype html>
     zoomVal.textContent = fmtZoom(zoom);
     zoomTag.textContent = fmtZoom(zoom);
   }
-  // Apply the current zoom. Prefer the camera's real zoom; otherwise fall back
-  // to digital zoom — scale the preview with CSS (the stage clips it) and crop
-  // the captured frame so the upload is actually zoomed in, not just the view.
+  // How far the digital-zoom view can pan from centre, as a fraction of the
+  // frame, given the current zoom (0 when not zoomed in). At zoom Z the visible
+  // window is 1/Z of the frame, leaving (1 - 1/Z) of slack, split both sides.
+  function panRange() {
+    if (nativeZoom || zoom <= 1) return 0;
+    return (1 - 1 / zoom) / 2;
+  }
+  function clampPan() {
+    const r = panRange();
+    panX = Math.max(-r, Math.min(r, panX));
+    panY = Math.max(-r, Math.min(r, panY));
+    if (r === 0) panX = panY = 0;
+  }
+  // Apply the current zoom + pan. Prefer the camera's real zoom; otherwise fall
+  // back to digital zoom — scale/translate the preview with CSS (the stage clips
+  // it) and crop the captured frame so the upload matches what's shown.
   function applyZoom() {
+    clampPan();
     if (nativeZoom && track) {
       track.applyConstraints({ advanced: [{ zoom }] }).catch(() => {});
       video.style.transform = "";
     } else {
-      video.style.transform = "scale(" + zoom + ")";
+      // Translate by the pan offset (in % of the element), then scale. Negative
+      // because moving the view right means shifting the image left.
+      const tx = -panX * 100, ty = -panY * 100;
+      video.style.transform = "scale(" + zoom + ") translate(" + tx + "%, " + ty + "%)";
     }
     showZoom();
   }
@@ -382,6 +409,7 @@ const BOSS_HTML = `<!doctype html>
     video.srcObject = stream;
     track = stream.getVideoTracks()[0] || null;
     zoom = 1;
+    panX = panY = 0;
     await video.play().catch(() => {});
     setupZoomRange();
   }
@@ -400,7 +428,7 @@ const BOSS_HTML = `<!doctype html>
     badgeText.textContent = "Live";
     requestWakeLock();
     capture();
-    timer = setInterval(capture, INTERVAL_MS);
+    timer = setInterval(capture, intervalMs);
   }
   function stop() {
     if (timer) clearInterval(timer), (timer = null);
@@ -418,11 +446,13 @@ const BOSS_HTML = `<!doctype html>
     sending = true;
     try {
       const vw = video.videoWidth, vh = video.videoHeight;
-      // With digital zoom the camera frame isn't zoomed, so crop the centre by
-      // the zoom factor. With native zoom the frame is already zoomed: crop 1:1.
+      // With digital zoom the camera frame isn't zoomed, so crop by the zoom
+      // factor, offset by the pan. With native zoom the frame is already zoomed
+      // and panning isn't available: crop the centre 1:1.
       const crop = nativeZoom ? 1 : zoom;
       const sw = vw / crop, sh = vh / crop;
-      const sx = (vw - sw) / 2, sy = (vh - sh) / 2;
+      const px = nativeZoom ? 0 : panX, py = nativeZoom ? 0 : panY;
+      const sx = (vw - sw) / 2 + px * vw, sy = (vh - sh) / 2 + py * vh;
       const scale = Math.min(1, maxWidth / sw);
       canvas.width = Math.round(sw * scale);
       canvas.height = Math.round(sh * scale);
@@ -451,6 +481,12 @@ const BOSS_HTML = `<!doctype html>
   // Resolution selection — takes effect on the next captured frame.
   resSel.addEventListener("change", () => { maxWidth = parseInt(resSel.value, 10) || 480; });
 
+  // Capture interval — restart the timer immediately if we're broadcasting.
+  intervalSel.addEventListener("change", () => {
+    intervalMs = (parseInt(intervalSel.value, 10) || 5) * 1000;
+    if (timer) { clearInterval(timer); timer = setInterval(capture, intervalMs); }
+  });
+
   // Camera selection. Re-open the stream live if we're already broadcasting.
   camSel.addEventListener("change", async () => {
     deviceId = camSel.value;
@@ -463,15 +499,19 @@ const BOSS_HTML = `<!doctype html>
   // Slider zoom.
   zoomSlider.addEventListener("input", () => setZoom(parseFloat(zoomSlider.value)));
 
-  // Pinch-to-zoom on the preview.
+  // Pinch-to-zoom (two fingers) and drag-to-pan (one finger, when zoomed in).
   const pointers = new Map();
   let pinchStartDist = 0, pinchStartZoom = 1;
+  let panStart = null; // { x, y, panX, panY } for single-finger drag
   stage.addEventListener("pointerdown", (e) => {
     pointers.set(e.pointerId, e);
     if (pointers.size === 2) {
       const [a, b] = [...pointers.values()];
       pinchStartDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       pinchStartZoom = zoom;
+      panStart = null; // a second finger ends any in-progress pan
+    } else if (pointers.size === 1) {
+      panStart = { x: e.clientX, y: e.clientY, panX, panY };
     }
   });
   stage.addEventListener("pointermove", (e) => {
@@ -482,11 +522,19 @@ const BOSS_HTML = `<!doctype html>
       const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       setZoom(pinchStartZoom * (dist / pinchStartDist));
       e.preventDefault();
+    } else if (pointers.size === 1 && panStart && panRange() > 0) {
+      // Drag the image with the finger: move right -> reveal the left side.
+      const rect = stage.getBoundingClientRect();
+      panX = panStart.panX - (e.clientX - panStart.x) / rect.width / zoom;
+      panY = panStart.panY - (e.clientY - panStart.y) / rect.height / zoom;
+      applyZoom();
+      e.preventDefault();
     }
   }, { passive: false });
   function dropPointer(e) {
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinchStartDist = 0;
+    if (pointers.size === 0) panStart = null;
   }
   stage.addEventListener("pointerup", dropPointer);
   stage.addEventListener("pointercancel", dropPointer);
