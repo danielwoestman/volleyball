@@ -262,13 +262,13 @@ const BOSS_HTML = `<!doctype html>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
       </div>
       <div class="zoom">
-        <div class="row"><span class="k">Resolution</span><span class="v" id="resInfo">—</span></div>
-        <select id="resSel">
-          <option value="320">Tiny — 320px</option>
-          <option value="480" selected>Low — 480px</option>
-          <option value="640">Medium — 640px</option>
-          <option value="960">High — 960px</option>
-          <option value="1280">Max — 1280px</option>
+        <div class="row"><span class="k">Quality</span><span class="v" id="resInfo">—</span></div>
+        <select id="qualSel">
+          <option value="0.3">Low — smallest</option>
+          <option value="0.5">Medium</option>
+          <option value="0.7" selected>High</option>
+          <option value="0.85">Very high</option>
+          <option value="0.95">Max — largest</option>
         </select>
       </div>
       <div class="zoom">
@@ -290,15 +290,15 @@ const BOSS_HTML = `<!doctype html>
     </div>
   </div>
   <div class="err" id="err"></div>
-  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. The screen is kept awake automatically while broadcasting.</div>
+  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. Photos are sent at full camera resolution — use Quality to trade sharpness against upload size. The screen is kept awake automatically while broadcasting.</div>
  </div>
 <script>
+  const MAX_DIM = 4096;       // hard ceiling on the encoded frame's longest side
   let intervalMs = 5000;      // capture cadence; adjustable on the fly
-  let maxWidth = 480;         // capture width in px; adjustable on the fly
-  const JPEG_QUALITY = 0.5;
+  let jpegQuality = 0.7;      // JPEG quality, the only lossy step; adjustable
   const video = document.getElementById("preview");
   const camSel = document.getElementById("camSel");
-  const resSel = document.getElementById("resSel");
+  const qualSel = document.getElementById("qualSel");
   const resInfo = document.getElementById("resInfo");
   const intervalSel = document.getElementById("intervalSel");
   const startBtn = document.getElementById("startBtn");
@@ -368,8 +368,7 @@ const BOSS_HTML = `<!doctype html>
     clampPan();
     // Always digital zoom: scale + translate the preview, and crop the captured
     // frame to match. This keeps panning available on every device (optical zoom
-    // crops on the sensor centre, where there's nothing to pan to). Quality is
-    // unaffected here since we downscale to maxWidth anyway.
+    // crops on the sensor centre, where there's nothing to pan to).
     const tx = -panX * 100, ty = -panY * 100;
     video.style.transform = "scale(" + zoom + ") translate(" + tx + "%, " + ty + "%)";
     showZoom();
@@ -436,19 +435,17 @@ const BOSS_HTML = `<!doctype html>
     sending = true;
     try {
       const vw = video.videoWidth, vh = video.videoHeight;
-      // With digital zoom the camera frame isn't zoomed, so crop by the zoom
-      // factor, offset by the pan. With native zoom the frame is already zoomed
-      // and panning isn't available: crop the centre 1:1.
-      const crop = nativeZoom ? 1 : zoom;
-      const sw = vw / crop, sh = vh / crop;
-      const px = nativeZoom ? 0 : panX, py = nativeZoom ? 0 : panY;
-      const sx = (vw - sw) / 2 + px * vw, sy = (vh - sh) / 2 + py * vh;
-      const scale = Math.min(1, maxWidth / sw);
-      canvas.width = Math.round(sw * scale);
-      canvas.height = Math.round(sh * scale);
+      // Digital zoom: crop the centre by the zoom factor, offset by the pan.
+      const sw = vw / zoom, sh = vh / zoom;
+      const sx = (vw - sw) / 2 + panX * vw, sy = (vh - sh) / 2 + panY * vh;
+      // Encode at the crop's native resolution — no pre-downscale — so JPEG is
+      // the only lossy step. A ceiling guards against absurd canvas sizes.
+      const fit = Math.min(1, MAX_DIM / Math.max(sw, sh));
+      canvas.width = Math.round(sw * fit);
+      canvas.height = Math.round(sh * fit);
       const ctx = canvas.getContext("2d");
       ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", JPEG_QUALITY));
+      const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", jpegQuality));
       if (!blob) throw new Error("encode failed");
       const res = await fetch("/upload", {
         method: "POST",
@@ -468,8 +465,8 @@ const BOSS_HTML = `<!doctype html>
     }
   }
 
-  // Resolution selection — takes effect on the next captured frame.
-  resSel.addEventListener("change", () => { maxWidth = parseInt(resSel.value, 10) || 480; });
+  // JPEG quality selection — takes effect on the next captured frame.
+  qualSel.addEventListener("change", () => { jpegQuality = parseFloat(qualSel.value) || 0.7; });
 
   // Capture interval — restart the timer immediately if we're broadcasting.
   intervalSel.addEventListener("change", () => {
