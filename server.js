@@ -91,12 +91,17 @@ const VIEWER_HTML = `<!doctype html>
   const live = document.getElementById("live");
   const stamp = document.getElementById("stamp");
   let lastShown = 0;
-  // Always render the photo time in U.S. Central, regardless of the viewer's
-  // own timezone.
-  const timeFmt = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Chicago",
-    hour: "numeric", minute: "2-digit", second: "2-digit",
-  });
+  let lastUpdateMs = 0; // time of the latest photo, for the "x ago" counter
+  function agoText(ms) {
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    if (s < 60) return "Updated " + s + " second" + (s === 1 ? "" : "s") + " ago";
+    const m = Math.floor(s / 60), r = s % 60;
+    return "Updated " + m + " min " + r + " sec ago";
+  }
+  // Tick the relative time once a second so it counts up between frames.
+  function tick() {
+    if (lastUpdateMs) stamp.textContent = agoText(lastUpdateMs);
+  }
   async function poll() {
     try {
       const res = await fetch("/status", { cache: "no-store" });
@@ -112,7 +117,8 @@ const VIEWER_HTML = `<!doctype html>
         lastShown = lastUpdate;
       }
       if (hasImage) {
-        stamp.textContent = "Updated " + timeFmt.format(new Date(lastUpdate)) + " CT";
+        lastUpdateMs = lastUpdate;
+        tick();
         stamp.classList.add("on");
       } else {
         stamp.classList.remove("on");
@@ -125,6 +131,7 @@ const VIEWER_HTML = `<!doctype html>
   }
   poll();
   setInterval(poll, POLL_MS);
+  setInterval(tick, 1000);
 </script>
 </body>
 </html>`;
@@ -265,8 +272,8 @@ const BOSS_HTML = `<!doctype html>
  </div>
 <script>
   const INTERVAL_MS = 5000;
-  const MAX_WIDTH = 720;      // viewed only on phones, so keep frames small
-  const JPEG_QUALITY = 0.55;
+  const MAX_WIDTH = 480;      // viewed only on phones, so keep frames small
+  const JPEG_QUALITY = 0.5;
   const video = document.getElementById("preview");
   const camSel = document.getElementById("camSel");
   const startBtn = document.getElementById("startBtn");
