@@ -1,0 +1,13 @@
+{
+  "name": "scoreboard-cast",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Snap a scoreboard photo every 5s and broadcast it to viewers.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
