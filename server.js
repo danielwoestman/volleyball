@@ -260,7 +260,7 @@ const BOSS_HTML = `<!doctype html>
     <div class="panel">
       <div class="zoom">
         <div class="row"><span class="k">Camera</span></div>
-        <select id="camSel"><option value="">Default (rear)</option></select>
+        <select id="camSel"><option value="">Default (rear)</option><option value="front">Front (selfie)</option></select>
       </div>
       <div class="zoom">
         <div class="row"><span class="k">Zoom</span><span class="v" id="zoomVal">1.0×</span></div>
@@ -343,9 +343,9 @@ const BOSS_HTML = `<!doctype html>
   const canvas = document.createElement("canvas");
   function setErr(msg) { errEl.textContent = msg || ""; }
 
-  // List the available rear cameras so the user can pick e.g. the ultra-wide
-  // (0.5×) lens, which zoom can't reach. Labels need an active stream/permission
-  // to be populated, so this is called again after start().
+  // List the cameras so the user can pick a specific rear lens (e.g. the
+  // ultra-wide 0.5×) or the front camera. Labels need an active stream/
+  // permission to be populated, so this is called again after start().
   async function refreshCameras() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
     let devices;
@@ -354,9 +354,11 @@ const BOSS_HTML = `<!doctype html>
     if (!cams.length) return;
     const front = /front|user|face/i;
     const prev = camSel.value;
-    camSel.innerHTML = '<option value="">Default (rear)</option>';
+    // Rebuild: the two fixed facingMode options, then each specific rear lens.
+    camSel.innerHTML =
+      '<option value="">Default (rear)</option><option value="front">Front (selfie)</option>';
     cams.forEach((c, i) => {
-      if (front.test(c.label)) return; // hide selfie cameras
+      if (front.test(c.label)) return; // front cameras are covered by the fixed option
       const opt = document.createElement("option");
       opt.value = c.deviceId;
       opt.textContent = c.label || ("Camera " + (i + 1));
@@ -413,9 +415,13 @@ const BOSS_HTML = `<!doctype html>
   // start() and by switching cameras mid-broadcast.
   async function openStream() {
     if (stream) stream.getTracks().forEach((t) => t.stop());
-    const video_c = deviceId
-      ? { deviceId: { exact: deviceId } }
-      : { facingMode: { ideal: "environment" } };
+    // "front" -> selfie camera via facingMode; a deviceId -> that exact lens;
+    // "" -> let the browser pick the rear camera.
+    const video_c = deviceId === "front"
+      ? { facingMode: { ideal: "user" } }
+      : deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: { ideal: "environment" } };
     stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
     video.srcObject = stream;
     track = stream.getVideoTracks()[0] || null;
