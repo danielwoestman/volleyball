@@ -19,6 +19,7 @@ const MAX_UPLOAD_BYTES = 8 * 1024 * 1024; // 8 MB ceiling per frame
 
 let latestImage = null; // Buffer
 let lastUpdate = 0; // epoch ms
+let captureIntervalMs = 5000; // cadence the capture page reports, for staleness
 
 const VIEWER_HTML = `<!doctype html>
 <html lang="en">
@@ -85,7 +86,10 @@ const VIEWER_HTML = `<!doctype html>
   <div class="stamp" id="stamp"></div>
 <script>
   const POLL_MS = 2000;
-  const STALE_MS = 15000; // hide "LIVE" if no fresh frame in this window
+  // "LIVE" stays on as long as frames keep arriving on the capture page's
+  // cadence; allow a couple of missed frames (plus slack) before it drops.
+  const STALE_FLOOR_MS = 8000;
+  function staleMs(intervalMs) { return Math.max(STALE_FLOOR_MS, (intervalMs || 5000) * 2.5); }
   const img = document.getElementById("shot");
   const waiting = document.getElementById("waiting");
   const live = document.getElementById("live");
@@ -105,7 +109,7 @@ const VIEWER_HTML = `<!doctype html>
   async function poll() {
     try {
       const res = await fetch("/status", { cache: "no-store" });
-      const { hasImage, lastUpdate } = await res.json();
+      const { hasImage, lastUpdate, intervalMs } = await res.json();
       if (hasImage && lastUpdate !== lastShown) {
         const next = new Image();
         next.onload = () => {
@@ -123,7 +127,7 @@ const VIEWER_HTML = `<!doctype html>
       } else {
         stamp.classList.remove("on");
       }
-      const fresh = hasImage && Date.now() - lastUpdate < STALE_MS;
+      const fresh = hasImage && Date.now() - lastUpdate < staleMs(intervalMs);
       live.classList.toggle("on", fresh);
     } catch {
       live.classList.remove("on");
@@ -462,7 +466,7 @@ const BOSS_HTML = `<!doctype html>
       if (!blob) throw new Error("encode failed");
       const res = await fetch("/upload", {
         method: "POST",
-        headers: { "Content-Type": "image/jpeg" },
+        headers: { "Content-Type": "image/jpeg", "X-Interval-Ms": String(intervalMs) },
         body: blob,
       });
       if (!res.ok) throw new Error("upload " + res.status);
@@ -601,6 +605,9 @@ const server = http.createServer((req, res) => {
       if (aborted || chunks.length === 0) return json(res, 400, { error: "bad upload" });
       latestImage = Buffer.concat(chunks);
       lastUpdate = Date.now();
+      // The capture page reports its cadence so viewers can size staleness to it.
+      const reported = parseInt(req.headers["x-interval-ms"], 10);
+      if (reported > 0 && reported <= 600000) captureIntervalMs = reported;
       return json(res, 200, { ok: true, size: latestImage.length });
     });
     req.on("error", () => {
@@ -619,7 +626,7 @@ const server = http.createServer((req, res) => {
   }
 
   if (req.method === "GET" && url === "/status") {
-    return json(res, 200, { hasImage: !!latestImage, lastUpdate });
+    return json(res, 200, { hasImage: !!latestImage, lastUpdate, intervalMs: captureIntervalMs });
   }
 
   res.writeHead(404, { "Content-Type": "text/plain" });
