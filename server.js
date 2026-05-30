@@ -64,6 +64,14 @@ const VIEWER_HTML = `<!doctype html>
   .live.on { opacity: 1; }
   .live .dot { width: 9px; height: 9px; border-radius: 50%; background: #ff3b30; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  .stamp {
+    position: fixed; bottom: 14px; left: 16px;
+    background: rgba(0,0,0,.5); padding: 6px 12px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; color: #c7ccda;
+    font-variant-numeric: tabular-nums;
+    opacity: 0; transition: opacity .3s;
+  }
+  .stamp.on { opacity: 1; }
 </style>
 </head>
 <body>
@@ -74,13 +82,21 @@ const VIEWER_HTML = `<!doctype html>
   </div>
   <img id="shot" alt="Scoreboard" />
   <div class="live" id="live"><span class="dot"></span>LIVE</div>
+  <div class="stamp" id="stamp"></div>
 <script>
   const POLL_MS = 2000;
   const STALE_MS = 15000; // hide "LIVE" if no fresh frame in this window
   const img = document.getElementById("shot");
   const waiting = document.getElementById("waiting");
   const live = document.getElementById("live");
+  const stamp = document.getElementById("stamp");
   let lastShown = 0;
+  // Always render the photo time in U.S. Central, regardless of the viewer's
+  // own timezone.
+  const timeFmt = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    hour: "numeric", minute: "2-digit", second: "2-digit",
+  });
   async function poll() {
     try {
       const res = await fetch("/status", { cache: "no-store" });
@@ -94,6 +110,12 @@ const VIEWER_HTML = `<!doctype html>
         };
         next.src = "/latest.jpg?t=" + lastUpdate;
         lastShown = lastUpdate;
+      }
+      if (hasImage) {
+        stamp.textContent = "Updated " + timeFmt.format(new Date(lastUpdate)) + " CT";
+        stamp.classList.add("on");
+      } else {
+        stamp.classList.remove("on");
       }
       const fresh = hasImage && Date.now() - lastUpdate < STALE_MS;
       live.classList.toggle("on", fresh);
@@ -177,6 +199,11 @@ const BOSS_HTML = `<!doctype html>
   .zoom .k { color: #8b93a7; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
   .zoom .v { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
   input[type=range] { width: 100%; accent-color: #2f7bff; height: 28px; }
+  select {
+    width: 100%; appearance: none; -webkit-appearance: none;
+    background: #11141c; color: #e8eaf0; border: 1px solid #1d2230;
+    border-radius: 10px; padding: 10px 12px; font-size: 14px; font-weight: 600;
+  }
   .controls { display: flex; flex-direction: column; gap: 10px; }
   button {
     appearance: none; border: 0; border-radius: 12px; padding: 14px;
@@ -216,6 +243,10 @@ const BOSS_HTML = `<!doctype html>
     </div>
     <div class="panel">
       <div class="zoom">
+        <div class="row"><span class="k">Camera</span></div>
+        <select id="camSel"><option value="">Default (rear)</option></select>
+      </div>
+      <div class="zoom">
         <div class="row"><span class="k">Zoom</span><span class="v" id="zoomVal">1.0×</span></div>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
       </div>
@@ -234,9 +265,10 @@ const BOSS_HTML = `<!doctype html>
  </div>
 <script>
   const INTERVAL_MS = 5000;
-  const MAX_WIDTH = 1280;     // downscale wide frames to keep uploads small
-  const JPEG_QUALITY = 0.7;
+  const MAX_WIDTH = 720;      // viewed only on phones, so keep frames small
+  const JPEG_QUALITY = 0.55;
   const video = document.getElementById("preview");
+  const camSel = document.getElementById("camSel");
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const dot = document.getElementById("dot");
@@ -252,8 +284,31 @@ const BOSS_HTML = `<!doctype html>
   let track = null;            // active video track (for native zoom)
   let nativeZoom = null;       // { min, max, step } when the camera supports it
   let zoom = 1;                // current zoom factor (native units or digital ×)
+  let deviceId = "";           // chosen camera; "" = let the browser pick rear
   const canvas = document.createElement("canvas");
   function setErr(msg) { errEl.textContent = msg || ""; }
+
+  // List the available rear cameras so the user can pick e.g. the ultra-wide
+  // (0.5×) lens, which zoom can't reach. Labels need an active stream/permission
+  // to be populated, so this is called again after start().
+  async function refreshCameras() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+    let devices;
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch { return; }
+    const cams = devices.filter((d) => d.kind === "videoinput");
+    if (!cams.length) return;
+    const front = /front|user|face/i;
+    const prev = camSel.value;
+    camSel.innerHTML = '<option value="">Default (rear)</option>';
+    cams.forEach((c, i) => {
+      if (front.test(c.label)) return; // hide selfie cameras
+      const opt = document.createElement("option");
+      opt.value = c.deviceId;
+      opt.textContent = c.label || ("Camera " + (i + 1));
+      camSel.appendChild(opt);
+    });
+    if ([...camSel.options].some((o) => o.value === prev)) camSel.value = prev;
+  }
 
   function fmtZoom(z) { return z.toFixed(1) + "×"; }
   function showZoom() {
@@ -297,21 +352,29 @@ const BOSS_HTML = `<!doctype html>
     applyZoom();
   }
 
+  // Open (or reopen) the camera stream for the current deviceId. Shared by
+  // start() and by switching cameras mid-broadcast.
+  async function openStream() {
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    const video_c = deviceId
+      ? { deviceId: { exact: deviceId } }
+      : { facingMode: { ideal: "environment" } };
+    stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
+    video.srcObject = stream;
+    track = stream.getVideoTracks()[0] || null;
+    zoom = 1;
+    await video.play().catch(() => {});
+    setupZoomRange();
+  }
   async function start() {
     setErr("");
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 } },
-        audio: false,
-      });
+      await openStream();
     } catch (e) {
       setErr("Camera access denied or unavailable. On iPhone this page must be served over HTTPS, and you must allow camera access.");
       return;
     }
-    video.srcObject = stream;
-    track = stream.getVideoTracks()[0] || null;
-    await video.play().catch(() => {});
-    setupZoomRange();
+    await refreshCameras(); // labels are available now that we have permission
     startBtn.disabled = true;
     stopBtn.disabled = false;
     dot.classList.add("live");
@@ -365,6 +428,15 @@ const BOSS_HTML = `<!doctype html>
     }
   }
 
+  // Camera selection. Re-open the stream live if we're already broadcasting.
+  camSel.addEventListener("change", async () => {
+    deviceId = camSel.value;
+    if (!stream) return;
+    setErr("");
+    try { await openStream(); }
+    catch (e) { setErr("Could not switch camera: " + e.message); }
+  });
+
   // Slider zoom.
   zoomSlider.addEventListener("input", () => setZoom(parseFloat(zoomSlider.value)));
 
@@ -409,6 +481,13 @@ const BOSS_HTML = `<!doctype html>
   });
   startBtn.addEventListener("click", start);
   stopBtn.addEventListener("click", stop);
+
+  // Populate the camera list on load (labels stay blank until permission is
+  // granted, but this fills the count; start() refreshes it with real names).
+  refreshCameras();
+  if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
+    navigator.mediaDevices.addEventListener("devicechange", refreshCameras);
+  }
 </script>
 </body>
 </html>`;
