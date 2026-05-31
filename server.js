@@ -470,12 +470,15 @@ const BOSS_HTML = `<!doctype html>
   async function openStream() {
     if (stream) stream.getTracks().forEach((t) => t.stop());
     // "front" -> selfie camera via facingMode; a deviceId -> that exact lens;
-    // "" -> let the browser pick the rear camera.
+    // "" -> let the browser pick the rear camera. Request a high-res stream so
+    // digital zoom crops into real sensor detail instead of a low default frame;
+    // "ideal" lets the device snap to its nearest supported mode without failing.
+    const res = { width: { ideal: 3840 }, height: { ideal: 2160 } };
     const video_c = deviceId === "front"
-      ? { facingMode: { ideal: "user" } }
+      ? { facingMode: { ideal: "user" }, ...res }
       : deviceId
-        ? { deviceId: { exact: deviceId } }
-        : { facingMode: { ideal: "environment" } };
+        ? { deviceId: { exact: deviceId }, ...res }
+        : { facingMode: { ideal: "environment" }, ...res };
     stream = await navigator.mediaDevices.getUserMedia({ video: video_c, audio: false });
     video.srcObject = stream;
     track = stream.getVideoTracks()[0] || null;
