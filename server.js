@@ -204,6 +204,16 @@ const BOSS_HTML = `<!doctype html>
   .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
   .dot.live { background: #ff3b30; animation: pulse 1.2s infinite; }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+  /* Perspective-correction overlay: outline polygon + four corner handles. */
+  #warpSvg { position: absolute; inset: 0; width: 100%; height: 100%; display: none; pointer-events: none; }
+  #warpSvg.on { display: block; }
+  #warpSvg polygon { fill: rgba(47,123,255,.12); stroke: #2f7bff; stroke-width: 2; }
+  .handle {
+    position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px;
+    border-radius: 50%; border: 2px solid #fff; background: rgba(47,123,255,.5);
+    display: none; touch-action: none; z-index: 3;
+  }
+  .handle.on { display: block; }
   .panel { width: 100%; max-width: 340px; display: flex; flex-direction: column; gap: 12px; }
   .zoom { display: flex; flex-direction: column; gap: 6px; }
   .zoom .row { display: flex; justify-content: space-between; align-items: baseline; }
@@ -254,6 +264,11 @@ const BOSS_HTML = `<!doctype html>
   <div class="layout">
     <div class="stage" id="stage">
       <video id="preview" playsinline muted autoplay></video>
+      <svg id="warpSvg" preserveAspectRatio="none" viewBox="0 0 100 100"><polygon id="warpPoly" points="" /></svg>
+      <div class="handle" id="h0"></div>
+      <div class="handle" id="h1"></div>
+      <div class="handle" id="h2"></div>
+      <div class="handle" id="h3"></div>
       <div class="badge"><span class="dot" id="dot"></span><span id="badgeText">Idle</span></div>
       <div class="zoomtag" id="zoomTag">1.0×</div>
     </div>
@@ -265,6 +280,13 @@ const BOSS_HTML = `<!doctype html>
       <div class="zoom">
         <div class="row"><span class="k">Zoom</span><span class="v" id="zoomVal">1.0×</span></div>
         <input type="range" id="zoom" min="1" max="5" step="0.1" value="1" />
+      </div>
+      <div class="zoom">
+        <div class="row"><span class="k">Straighten corners</span></div>
+        <div class="controls">
+          <button class="stop" id="warpBtn">Adjust corners</button>
+          <button class="stop" id="warpReset" disabled>Reset corners</button>
+        </div>
       </div>
       <div class="zoom">
         <div class="row"><span class="k">Resolution</span></div>
@@ -309,7 +331,7 @@ const BOSS_HTML = `<!doctype html>
     </div>
   </div>
   <div class="err" id="err"></div>
-  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. The “Sent to viewers” image shows exactly what is broadcast — adjust Resolution and Quality until it looks good enough. The screen is kept awake automatically while broadcasting.</div>
+  <div class="hint">Keep this page open and the screen on. On iPhone, tap “Start” and allow camera access. Pinch or use the slider to zoom; drag the preview with one finger to choose what's in frame. Tap “Adjust corners” to drag the four corners onto the scoreboard — the photo is straightened to a rectangle, so an angled phone still sends a square-on view. The “Sent to viewers” image shows exactly what is broadcast. The screen is kept awake automatically while broadcasting.</div>
  </div>
 <script>
   const MAX_DIM = 4096;       // hard ceiling on the encoded frame's longest side
@@ -341,7 +363,39 @@ const BOSS_HTML = `<!doctype html>
   let panX = 0, panY = 0;      // digital-zoom pan, normalized -1..1 (0 = centre)
   let deviceId = "";           // chosen camera; "" = let the browser pick rear
   const canvas = document.createElement("canvas");
+  // Perspective correction: four corner points in normalized 0..1 stage coords,
+  // order TL, TR, BR, BL. Default = full frame (identity, no warp).
+  let warpMode = false;
+  let corners = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
+  const handleEls = [0,1,2,3].map((i) => document.getElementById("h" + i));
+  const warpSvg = document.getElementById("warpSvg");
+  const warpPoly = document.getElementById("warpPoly");
+  const warpBtn = document.getElementById("warpBtn");
+  const warpReset = document.getElementById("warpReset");
   function setErr(msg) { errEl.textContent = msg || ""; }
+
+  function cornersAreDefault() {
+    const d = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
+    return corners.every((c, i) => Math.abs(c.x - d[i].x) < 1e-4 && Math.abs(c.y - d[i].y) < 1e-4);
+  }
+  // Position the handle elements and outline over the stage from corners.
+  function drawWarpOverlay() {
+    const rect = stage.getBoundingClientRect();
+    corners.forEach((c, i) => {
+      handleEls[i].style.left = (c.x * rect.width) + "px";
+      handleEls[i].style.top = (c.y * rect.height) + "px";
+    });
+    warpPoly.setAttribute("points", corners.map((c) => (c.x * 100) + "," + (c.y * 100)).join(" "));
+    warpReset.disabled = cornersAreDefault();
+  }
+  function showWarpUI(on) {
+    warpSvg.classList.toggle("on", on);
+    handleEls.forEach((h) => h.classList.toggle("on", on));
+    warpBtn.textContent = on ? "Done" : "Adjust corners";
+    warpBtn.classList.toggle("start", on);
+    warpBtn.classList.toggle("stop", !on);
+    if (on) drawWarpOverlay();
+  }
 
   // List the cameras so the user can pick a specific rear lens (e.g. the
   // ultra-wide 0.5×) or the front camera. Labels need an active stream/
@@ -447,6 +501,58 @@ const BOSS_HTML = `<!doctype html>
     capture();
     timer = setInterval(capture, intervalMs);
   }
+
+  // Render the quadrilateral defined by corners (normalized over the crop
+  // sx,sy,sw,sh of the source video) into the full ow x oh output rectangle,
+  // applying a projective warp via a triangle mesh. Dependency-free.
+  function warpQuadToRect(ctx, src, sx, sy, sw, sh, ow, oh) {
+    // Source positions of the four corners, in source-image pixels.
+    const S = corners.map((c) => ({ x: sx + c.x * sw, y: sy + c.y * sh }));
+    const N = 24; // mesh resolution; higher = smoother perspective
+    // Bilinear point on the source quad for grid coords u,v in 0..1
+    // (TL=S0, TR=S1, BR=S2, BL=S3).
+    const srcAt = (u, v) => {
+      const topx = S[0].x + (S[1].x - S[0].x) * u, topy = S[0].y + (S[1].y - S[0].y) * u;
+      const botx = S[3].x + (S[2].x - S[3].x) * u, boty = S[3].y + (S[2].y - S[3].y) * u;
+      return { x: topx + (botx - topx) * v, y: topy + (boty - topy) * v };
+    };
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        const u0 = i / N, u1 = (i + 1) / N, v0 = j / N, v1 = (j + 1) / N;
+        // Destination cell rectangle.
+        const dx0 = u0 * ow, dx1 = u1 * ow, dy0 = v0 * oh, dy1 = v1 * oh;
+        const s00 = srcAt(u0, v0), s10 = srcAt(u1, v0), s01 = srcAt(u0, v1);
+        drawTri(ctx, src,
+          s00, s10, s01,
+          { x: dx0, y: dy0 }, { x: dx1, y: dy0 }, { x: dx0, y: dy1 });
+        const s11 = srcAt(u1, v1);
+        drawTri(ctx, src,
+          s10, s11, s01,
+          { x: dx1, y: dy0 }, { x: dx1, y: dy1 }, { x: dx0, y: dy1 });
+      }
+    }
+  }
+  // Draw the source triangle (a,b,c) onto the destination triangle (A,B,C)
+  // using a clipped affine transform.
+  function drawTri(ctx, src, a, b, c, A, B, C) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y); ctx.lineTo(C.x, C.y); ctx.closePath();
+    ctx.clip();
+    // Solve the affine matrix mapping src tri -> dst tri.
+    const denom = (b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y);
+    if (Math.abs(denom) < 1e-6) { ctx.restore(); return; }
+    const m11 = ((B.x - A.x) * (c.y - a.y) - (C.x - A.x) * (b.y - a.y)) / denom;
+    const m12 = ((B.y - A.y) * (c.y - a.y) - (C.y - A.y) * (b.y - a.y)) / denom;
+    const m21 = ((C.x - A.x) * (b.x - a.x) - (B.x - A.x) * (c.x - a.x)) / denom;
+    const m22 = ((C.y - A.y) * (b.x - a.x) - (B.y - A.y) * (c.x - a.x)) / denom;
+    const dx = A.x - m11 * a.x - m21 * a.y;
+    const dy = A.y - m12 * a.x - m22 * a.y;
+    ctx.setTransform(m11, m12, m21, m22, dx, dy);
+    ctx.drawImage(src, 0, 0);
+    ctx.restore();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
   function stop() {
     if (timer) clearInterval(timer), (timer = null);
     if (stream) stream.getTracks().forEach((t) => t.stop()), (stream = null);
@@ -473,7 +579,14 @@ const BOSS_HTML = `<!doctype html>
       canvas.width = Math.round(sw * fit);
       canvas.height = Math.round(sh * fit);
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      if (cornersAreDefault()) {
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+      } else {
+        // Perspective-correct: the four marked corners (in crop-relative coords)
+        // are warped so the quadrilateral fills the output rectangle.
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        warpQuadToRect(ctx, video, sx, sy, sw, sh, canvas.width, canvas.height);
+      }
       const blob = await new Promise((r) => canvas.toBlob(r, "image/jpeg", jpegQuality));
       if (!blob) throw new Error("encode failed");
       const res = await fetch("/upload", {
@@ -523,6 +636,34 @@ const BOSS_HTML = `<!doctype html>
 
   // Slider zoom.
   zoomSlider.addEventListener("input", () => setZoom(parseFloat(zoomSlider.value)));
+
+  // Corner-straightening controls.
+  warpBtn.addEventListener("click", () => { warpMode = !warpMode; showWarpUI(warpMode); });
+  warpReset.addEventListener("click", () => {
+    corners = [{x:0,y:0},{x:1,y:0},{x:1,y:1},{x:0,y:1}];
+    drawWarpOverlay();
+  });
+  // Drag a corner handle (own pointer stream so it doesn't trigger pan/zoom).
+  handleEls.forEach((h, i) => {
+    h.addEventListener("pointerdown", (e) => {
+      e.stopPropagation();
+      h.setPointerCapture(e.pointerId);
+    });
+    h.addEventListener("pointermove", (e) => {
+      if (!h.hasPointerCapture(e.pointerId)) return;
+      const rect = stage.getBoundingClientRect();
+      corners[i] = {
+        x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+        y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+      };
+      drawWarpOverlay();
+      e.preventDefault();
+    });
+    const end = (e) => { if (h.hasPointerCapture(e.pointerId)) h.releasePointerCapture(e.pointerId); };
+    h.addEventListener("pointerup", end);
+    h.addEventListener("pointercancel", end);
+  });
+  window.addEventListener("resize", () => { if (warpMode) drawWarpOverlay(); });
 
   // Pinch-to-zoom (two fingers) and drag-to-pan (one finger, when zoomed in).
   const pointers = new Map();
